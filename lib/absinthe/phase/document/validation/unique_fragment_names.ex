@@ -12,32 +12,20 @@ defmodule Absinthe.Phase.Document.Validation.UniqueFragmentNames do
   """
   @spec run(Blueprint.t(), Keyword.t()) :: Phase.result_t()
   def run(input, _options \\ []) do
+    counts = Enum.frequencies_by(input.fragments, & &1.name)
+
     fragments =
-      for fragment <- input.fragments do
-        process(fragment, input.fragments)
-      end
+      Enum.map(input.fragments, fn fragment ->
+        if Map.fetch!(counts, fragment.name) > 1 do
+          fragment
+          |> flag_invalid(:duplicate_name)
+          |> put_error(error(fragment))
+        else
+          fragment
+        end
+      end)
 
-    result = %{input | fragments: fragments}
-    {:ok, result}
-  end
-
-  @spec process(Blueprint.Document.Fragment.Named.t(), [Blueprint.Document.Fragment.Named.t()]) ::
-          Blueprint.Document.Fragment.Named.t()
-  defp process(fragment, fragments) do
-    if duplicate?(fragments, fragment) do
-      fragment
-      |> flag_invalid(:duplicate_name)
-      |> put_error(error(fragment))
-    else
-      fragment
-    end
-  end
-
-  # Whether a duplicate fragment is present
-  @spec duplicate?([Blueprint.Document.Fragment.Named.t()], Blueprint.Document.Fragment.Named.t()) ::
-          boolean
-  defp duplicate?(fragments, fragment) do
-    Enum.count(fragments, &(&1.name == fragment.name)) > 1
+    {:ok, %{input | fragments: fragments}}
   end
 
   # Generate an error for a duplicate fragment.

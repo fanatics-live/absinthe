@@ -21,7 +21,14 @@ defmodule Absinthe.PipelineTest do
         Pipeline.for_document(Schema)
         |> Pipeline.upto(Phase.Blueprint)
 
-      assert {:ok, %Blueprint{}, [Phase.Blueprint, Phase.Parse, Phase.Telemetry, Phase.Init]} =
+      assert {:ok, %Blueprint{},
+              [
+                Phase.Blueprint,
+                Phase.Document.Validation.ExecutableDefinitions,
+                Phase.Parse,
+                Phase.Telemetry,
+                Phase.Init
+              ]} =
                Pipeline.run(@query, pipeline)
     end
   end
