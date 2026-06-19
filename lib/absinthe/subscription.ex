@@ -191,22 +191,32 @@ defmodule Absinthe.Subscription do
 
   @doc false
   def get(pubsub, key) do
+    {docs, _entry_count} = get_with_entry_count(pubsub, key)
+    docs
+  end
+
+  @doc false
+  def get_with_entry_count(pubsub, key) do
     name = registry_name(pubsub)
 
-    name
-    |> Registry.lookup(key)
-    |> MapSet.new(fn {_pid, doc_id} -> doc_id end)
-    |> Enum.reduce([], fn doc_id, acc ->
-      case Registry.lookup(name, doc_id) do
-        [] ->
-          acc
+    entries = Registry.lookup(name, key)
 
-        [{_pid, doc} | _rest] ->
-          doc = Map.update!(doc, :initial_phases, &PipelineSerializer.unpack/1)
-          [{doc_id, doc} | acc]
-      end
-    end)
-    |> Map.new()
+    docs =
+      entries
+      |> MapSet.new(fn {_pid, doc_id} -> doc_id end)
+      |> Enum.reduce([], fn doc_id, acc ->
+        case Registry.lookup(name, doc_id) do
+          [] ->
+            acc
+
+          [{_pid, doc} | _rest] ->
+            doc = Map.update!(doc, :initial_phases, &PipelineSerializer.unpack/1)
+            [{doc_id, doc} | acc]
+        end
+      end)
+      |> Map.new()
+
+    {docs, length(entries)}
   end
 
   @doc false
