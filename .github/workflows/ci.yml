@@ -13,11 +13,10 @@ jobs:
     strategy:
       matrix:
         elixir:
-          - "1.15"
-          - "1.16"
           - "1.17"
           - "1.18"
           - "1.19"
+          - "1.20"
         otp:
           - "25"
           - "26"
@@ -25,22 +24,18 @@ jobs:
           - "28"
         # see https://hexdocs.pm/elixir/compatibility-and-deprecations.html#between-elixir-and-erlang-otp
         exclude:
+          - elixir: 1.20
+            otp: 25
+          - elixir: 1.20
+            otp: 26
           - elixir: 1.19
             otp: 25
           - elixir: 1.17
             otp: 28
-          - elixir: 1.16
-            otp: 28
-          - elixir: 1.16
-            otp: 27
-          - elixir: 1.15
-            otp: 28
-          - elixir: 1.15
-            otp: 27
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
@@ -49,7 +44,7 @@ jobs:
           otp-version: ${{ matrix.otp }}
 
       - name: Restore deps cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -78,7 +73,7 @@ jobs:
           SCHEMA_PROVIDER: persistent_term
 
       - name: Cache/uncache PLTs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             priv/plts
@@ -89,6 +84,7 @@ jobs:
 
       - name: Run Dialyzer
         run: mix dialyzer
+
   release:
     name: Create or Update Release PR
     runs-on: ubuntu-latest
@@ -98,7 +94,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.REPO_GITHUB_TOKEN }}
           release-type: elixir
