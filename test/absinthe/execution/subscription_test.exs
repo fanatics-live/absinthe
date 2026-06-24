@@ -811,8 +811,10 @@ defmodule Absinthe.Execution.SubscriptionTest do
         [:absinthe, :subscription, :publish, :stop],
         [:absinthe, :subscription, :local, :get_docs, :start],
         [:absinthe, :subscription, :local, :run_docset, :start],
+        [:absinthe, :subscription, :local, :dispatch, :start],
         [:absinthe, :subscription, :local, :get_docs, :stop],
-        [:absinthe, :subscription, :local, :run_docset, :stop]
+        [:absinthe, :subscription, :local, :run_docset, :stop],
+        [:absinthe, :subscription, :local, :dispatch, :stop]
       ],
       &Absinthe.TestTelemetryHelper.send_to_pid/4,
       %{}
@@ -859,9 +861,11 @@ defmodule Absinthe.Execution.SubscriptionTest do
     assert is_reference(metadata.telemetry_span_context)
 
     assert_receive {:telemetry_event,
-                    {[:absinthe, :subscription, :local, :get_docs, :stop], _, metadata, _config}}
+                    {[:absinthe, :subscription, :local, :get_docs, :stop], measurements, metadata,
+                     _config}}
 
-    assert %{} == Map.drop(metadata, [:telemetry_span_context])
+    assert %{entries_scanned: 1, doc_count: 1} = measurements
+    assert %{field: :thing} == Map.drop(metadata, [:telemetry_span_context])
     assert is_reference(metadata.telemetry_span_context)
 
     assert_receive {:telemetry_event,
@@ -873,11 +877,81 @@ defmodule Absinthe.Execution.SubscriptionTest do
     assert is_function(metadata.run_docset_fn, 3)
 
     assert_receive {:telemetry_event,
-                    {[:absinthe, :subscription, :local, :run_docset, :stop], _, metadata, _config}}
+                    {[:absinthe, :subscription, :local, :dispatch, :start], _, metadata, _config}}
 
+    assert %{field: :thing} == Map.drop(metadata, [:telemetry_span_context])
+    assert is_reference(metadata.telemetry_span_context)
+
+    assert_receive {:telemetry_event,
+                    {[:absinthe, :subscription, :local, :dispatch, :stop], measurements, metadata,
+                     _config}}
+
+    assert %{subscriber_count: 1} = measurements
+    assert %{field: :thing} == Map.drop(metadata, [:telemetry_span_context])
+    assert is_reference(metadata.telemetry_span_context)
+
+    assert_receive {:telemetry_event,
+                    {[:absinthe, :subscription, :local, :run_docset, :stop], measurements,
+                     metadata, _config}}
+
+    assert %{doc_count: 1} = measurements
+    assert %{field: :thing} == Map.drop(metadata, [:telemetry_span_context])
     assert is_reference(metadata.telemetry_span_context)
 
     :telemetry.detach(context.test)
+  end
+
+  @query """
+  subscription {
+    otherUser { id }
+  }
+  """
+  test "subscription fanout stop telemetry reports scanned entries and subscriber count",
+       context do
+    :telemetry.attach_many(
+      context.test,
+      [
+        [:absinthe, :subscription, :local, :get_docs, :stop],
+        [:absinthe, :subscription, :local, :run_docset, :stop],
+        [:absinthe, :subscription, :local, :dispatch, :stop]
+      ],
+      &Absinthe.TestTelemetryHelper.send_to_pid/4,
+      %{}
+    )
+
+    on_exit(fn -> :telemetry.detach(context.test) end)
+
+    assert {:ok, %{"subscribed" => topic}} =
+             run_subscription(@query, Schema, context: %{context_id: "logged-in"})
+
+    assert {:ok, %{"subscribed" => ^topic}} =
+             run_subscription(@query, Schema, context: %{context_id: "logged-in"})
+
+    Absinthe.Subscription.publish(PubSub, %{id: "global_user_id"}, other_user: "*")
+
+    assert_receive({:broadcast, %{topic: ^topic}})
+    assert_receive({:broadcast, %{topic: ^topic}})
+
+    assert_receive {:telemetry_event,
+                    {[:absinthe, :subscription, :local, :get_docs, :stop], measurements, metadata,
+                     _config}}
+
+    assert %{entries_scanned: 2, doc_count: 1} = measurements
+    assert %{field: :other_user} == Map.drop(metadata, [:telemetry_span_context])
+
+    assert_receive {:telemetry_event,
+                    {[:absinthe, :subscription, :local, :dispatch, :stop], measurements, metadata,
+                     _config}}
+
+    assert %{subscriber_count: 2} = measurements
+    assert %{field: :other_user} == Map.drop(metadata, [:telemetry_span_context])
+
+    assert_receive {:telemetry_event,
+                    {[:absinthe, :subscription, :local, :run_docset, :stop], measurements,
+                     metadata, _config}}
+
+    assert %{doc_count: 1} = measurements
+    assert %{field: :other_user} == Map.drop(metadata, [:telemetry_span_context])
   end
 
   @query """

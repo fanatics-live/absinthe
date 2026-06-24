@@ -22,14 +22,49 @@ defmodule Absinthe.Subscription.Local do
           [Absinthe.Subscription.subscription_field_spec()]
         ) :: :ok
   def publish_mutation(pubsub, mutation_result, subscribed_fields) do
+    {docs_and_topic_batches, fields_by_topic, subscriber_counts_by_topic} =
+      Enum.reduce(subscribed_fields, {[], %{}, %{}}, fn {field, key_strategy},
+                                                        {docs_and_topic_batches, fields_by_topic,
+                                                         subscriber_counts_by_topic} ->
+        {docs, field_subscriber_counts} =
+          get_docs_with_telemetry(pubsub, field, mutation_result, key_strategy)
+
+        docs_and_topics_for_field =
+          Enum.map(docs, fn {topic, doc} -> {topic, key_strategy, doc} end)
+
+        fields_by_topic =
+          Enum.reduce(docs, fields_by_topic, fn {topic, _doc}, fields_by_topic ->
+            Map.put_new(fields_by_topic, topic, field)
+          end)
+
+        {
+          [docs_and_topics_for_field | docs_and_topic_batches],
+          fields_by_topic,
+          Map.merge(subscriber_counts_by_topic, field_subscriber_counts)
+        }
+      end)
+
     docs_and_topics =
-      for {field, key_strategy} <- subscribed_fields,
-          {topic, doc} <- get_docs_with_telemetry(pubsub, field, mutation_result, key_strategy) do
-        {topic, key_strategy, doc}
-      end
+      docs_and_topic_batches
+      |> Enum.reverse()
+      |> :lists.append()
+
+    run_docset_field = run_docset_field(fields_by_topic, subscribed_fields)
 
     run_docset_fn =
-      if function_exported?(pubsub, :run_docset, 3), do: &pubsub.run_docset/3, else: &run_docset/3
+      if function_exported?(pubsub, :run_docset, 3) do
+        &pubsub.run_docset/3
+      else
+        fn pubsub, docs_and_topics, mutation_result ->
+          run_docset(
+            pubsub,
+            docs_and_topics,
+            mutation_result,
+            fields_by_topic,
+            subscriber_counts_by_topic
+          )
+        end
+      end
 
     :telemetry.span(
       [:absinthe, :subscription, :local, :run_docset],
@@ -39,7 +74,11 @@ defmodule Absinthe.Subscription.Local do
         docs_and_topics: docs_and_topics
       },
       fn ->
-        {run_docset_fn.(pubsub, docs_and_topics, mutation_result), %{}}
+        {
+          run_docset_fn.(pubsub, docs_and_topics, mutation_result),
+          %{doc_count: doc_count(docs_and_topics)},
+          field_metadata(run_docset_field)
+        }
       end
     )
 
@@ -56,15 +95,30 @@ defmodule Absinthe.Subscription.Local do
         key_strategy: key_strategy
       },
       fn ->
-        {get_docs(pubsub, field, mutation_result, key_strategy), %{}}
+        {docs, entries_scanned, doc_count, subscriber_counts_by_topic} =
+          get_docs(pubsub, field, mutation_result, key_strategy)
+
+        {
+          {docs, subscriber_counts_by_topic},
+          %{entries_scanned: entries_scanned, doc_count: doc_count},
+          field_metadata(field)
+        }
       end
     )
   end
 
-  defp run_docset(pubsub, docs_and_topics, mutation_result) do
+  defp run_docset(
+         pubsub,
+         docs_and_topics,
+         mutation_result,
+         fields_by_topic,
+         subscriber_counts_by_topic
+       ) do
     for {topic, key_strategy, doc} <- docs_and_topics do
       try do
         pipeline = pipeline(doc, mutation_result)
+        field = Map.get(fields_by_topic, topic)
+        subscriber_count = Map.get(subscriber_counts_by_topic, topic, 0)
 
         {:ok, %{result: data}, _} = Absinthe.Pipeline.run(doc.source, pipeline)
 
@@ -75,7 +129,7 @@ defmodule Absinthe.Subscription.Local do
         Data: #{inspect(data)}
         """)
 
-        :ok = pubsub.publish_subscription(topic, data)
+        :ok = dispatch_with_telemetry(pubsub, field, topic, data, subscriber_count)
       rescue
         e ->
           BatchResolver.pipeline_error(e, __STACKTRACE__)
@@ -118,11 +172,79 @@ defmodule Absinthe.Subscription.Local do
   end
 
   defp do_get_docs(pubsub, field, keys) do
-    keys
-    |> List.wrap()
-    |> Enum.map(&to_string/1)
-    |> Enum.flat_map(&Absinthe.Subscription.get(pubsub, {field, &1}))
+    {doc_batches, entries_scanned, doc_ids, subscriber_counts_by_topic} =
+      keys
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
+      |> Enum.reduce({[], 0, MapSet.new(), %{}}, fn key,
+                                                    {doc_batches, entries_scanned, doc_ids,
+                                                     subscriber_counts_by_topic} ->
+        {key_docs, entry_count, key_subscriber_counts} =
+          Absinthe.Subscription.get_with_counts(pubsub, {field, key})
+
+        key_docs = Enum.to_list(key_docs)
+
+        doc_ids =
+          Enum.reduce(key_docs, doc_ids, fn {doc_id, _doc}, doc_ids ->
+            MapSet.put(doc_ids, doc_id)
+          end)
+
+        {
+          [key_docs | doc_batches],
+          entries_scanned + entry_count,
+          doc_ids,
+          Map.merge(subscriber_counts_by_topic, key_subscriber_counts)
+        }
+      end)
+
+    docs =
+      doc_batches
+      |> Enum.reverse()
+      |> :lists.append()
+
+    {docs, entries_scanned, MapSet.size(doc_ids), subscriber_counts_by_topic}
   end
+
+  defp dispatch_with_telemetry(pubsub, field, topic, data, subscriber_count) do
+    :telemetry.span(
+      [:absinthe, :subscription, :local, :dispatch],
+      field_metadata(field),
+      fn ->
+        {
+          pubsub.publish_subscription(topic, data),
+          %{subscriber_count: subscriber_count},
+          field_metadata(field)
+        }
+      end
+    )
+  end
+
+  defp doc_count(docs_and_topics) do
+    docs_and_topics
+    |> Enum.map(fn {topic, _key_strategy, _doc} -> topic end)
+    |> MapSet.new()
+    |> MapSet.size()
+  end
+
+  defp run_docset_field(fields_by_topic, subscribed_fields) do
+    case available_field(Map.values(fields_by_topic)) do
+      nil -> available_field(Keyword.keys(subscribed_fields))
+      field -> field
+    end
+  end
+
+  defp available_field(fields) do
+    fields
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> case do
+      [field] -> field
+      _ -> nil
+    end
+  end
+
+  defp field_metadata(nil), do: %{}
+  defp field_metadata(field), do: %{field: field}
 
   defp result_phase(doc) do
     # use the configured result phase from the initial pipeline
